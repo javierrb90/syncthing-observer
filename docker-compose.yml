@@ -8,7 +8,7 @@ services:
     environment:
       SYNCTHING_URL: "http://192.168.1.50:8384"
       SYNCTHING_API_KEY: "idsbxX5nYjmz4hk7Q3nhtPxsuUwANQdj"
-      NOTIFICATIONS_URL: "http://192.168.1.63:3000/api/notifications"
+      NOTIFICATIONS_URL: "http://192.168.1.50:3000/api/notifications"
       STATE_FILE: "/data/state.json"
       SYNC_DIRECTION: "both"
       FOLDER_NAMES_JSON: '{"screenshots":"Capturas de pantalla","obsidian":"Obsidian","camera":"Fotos del móvil"}'

@@ -1,0 +1,15 @@
+{
+  "name": "syncthing-activity-notifier",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lightweight Syncthing activity notifier for a LAN notification center",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "check": "node --check src/index.js && node --check src/config.js && node --check src/logger.js && node --check src/storage.js && node --check src/syncthing.js && node --check src/notifications.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

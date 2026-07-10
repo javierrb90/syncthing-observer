@@ -1,0 +1,21 @@
+services:
+  syncthing-activity-notifier:
+    build:
+      context: .
+    container_name: syncthing-activity-notifier
+    restart: unless-stopped
+    init: true
+    environment:
+      SYNCTHING_URL: "http://ssrb.local:8384"
+      SYNCTHING_API_KEY: "REPLACE_WITH_YOUR_API_KEY"
+      NOTIFICATIONS_URL: "http://kiosko.local:3000/api/notifications"
+      STATE_FILE: "/data/state.json"
+      SYNC_DIRECTION: "both"
+      FOLDER_NAMES_JSON: '{"screenshots":"Capturas de pantalla","obsidian":"Obsidian","camera":"Fotos del móvil"}'
+      LOG_LEVEL: "info"
+      DEDUPLICATION_WINDOW_SECONDS: "60"
+    volumes:
+      - syncthing-notifier-data:/data
+
+volumes:
+  syncthing-notifier-data:

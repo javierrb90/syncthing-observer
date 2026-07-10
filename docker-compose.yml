@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     init: true
     environment:
-      SYNCTHING_URL: "hhttp://192.168.1.50:8384"
+      SYNCTHING_URL: "http://192.168.1.50:8384"
       SYNCTHING_API_KEY: "idsbxX5nYjmz4hk7Q3nhtPxsuUwANQdj"
       NOTIFICATIONS_URL: "http://192.168.1.63:3000/api/notifications"
       STATE_FILE: "/data/state.json"

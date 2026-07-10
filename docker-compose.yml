@@ -6,9 +6,9 @@ services:
     restart: unless-stopped
     init: true
     environment:
-      SYNCTHING_URL: "http://ssrb.local:8384"
-      SYNCTHING_API_KEY: "REPLACE_WITH_YOUR_API_KEY"
-      NOTIFICATIONS_URL: "http://kiosko.local:3000/api/notifications"
+      SYNCTHING_URL: "hhttp://192.168.1.50:8384"
+      SYNCTHING_API_KEY: "idsbxX5nYjmz4hk7Q3nhtPxsuUwANQdj"
+      NOTIFICATIONS_URL: "http://192.168.1.63:3000/api/notifications"
       STATE_FILE: "/data/state.json"
       SYNC_DIRECTION: "both"
       FOLDER_NAMES_JSON: '{"screenshots":"Capturas de pantalla","obsidian":"Obsidian","camera":"Fotos del móvil"}'

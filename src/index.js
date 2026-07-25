@@ -72,6 +72,7 @@ try {
   logger.info("application_started", {
     stateFile: config.stateFile,
     quietPeriodMs: config.quietPeriodMs,
+    syncCooldownMs: config.syncCooldownMs,
     httpPort: config.httpPort
   });
 

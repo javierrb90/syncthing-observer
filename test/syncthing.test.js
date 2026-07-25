@@ -10,7 +10,7 @@ const silentLogger = Object.freeze({
   error() {}
 });
 
-function makeMonitor(sent) {
+function makeMonitor(sent, configOverrides = {}) {
   const state = {
     initialized: true,
     lastMainEvent: 0,
@@ -23,12 +23,14 @@ function makeMonitor(sent) {
     config: {
       folderNames: {},
       quietPeriodMs: 20,
+      syncCooldownMs: 1000,
       outboxRetryDelayMs: 1000,
       syncthingUrl: "http://127.0.0.1:1",
       syncthingApiKey: "key",
       eventTimeoutSeconds: 60,
       reconnectMinDelayMs: 1,
-      reconnectMaxDelayMs: 2
+      reconnectMaxDelayMs: 2,
+      ...configOverrides
     },
     logger: silentLogger,
     state,
@@ -45,6 +47,7 @@ function makeMonitor(sent) {
   monitor.instanceId = "MINIPC-ID";
   monitor.instanceName = "MiniPC";
   monitor.folderInfo.set("pcsx2", { label: "(Saves) PCSX2 (PS2)" });
+  monitor.folderInfo.set("screenshots", { label: "Screenshots" });
   monitor.deviceNamesByShortId.set("AAAAAAA", "Consola A");
   monitor.deviceNamesByShortId.set("BBBBBBB", "Consola B");
   return { monitor, state, shutdownController };
@@ -192,4 +195,91 @@ test("cursor migration keeps main and disk event streams separate", async () => 
   assert.equal(state.lastDiskEvent, 84);
   assert.equal(state.initialized, true);
   assert.equal(state.diskInitialized, true);
+});
+
+
+test("repeated updates from the same device and folder are suppressed during cooldown", async () => {
+  const sent = [];
+  const { monitor, state } = makeMonitor(sent, { syncCooldownMs: 1000 });
+
+  const syncOnce = (baseId) => {
+    monitor.handleRemoteChangeDetected({
+      id: baseId,
+      time: new Date().toISOString(),
+      data: { folder: "screenshots", path: `${baseId}.png`, modifiedBy: "AAAAAAA" }
+    });
+    monitor.handleItemFinished({
+      id: baseId + 1,
+      time: new Date().toISOString(),
+      data: { folder: "screenshots", item: `${baseId}.png`, action: "update", type: "file", error: null }
+    });
+    monitor.handleStateChanged({
+      id: baseId + 2,
+      time: new Date().toISOString(),
+      data: { folder: "screenshots", from: "syncing", to: "idle" }
+    });
+  };
+
+  syncOnce(10);
+  await sleep(60);
+  syncOnce(20);
+  await sleep(60);
+
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].originDeviceNames, ["Consola A"]);
+  assert.equal(Object.keys(state.notificationCooldowns).length, 1);
+});
+
+test("cooldown does not hide a different device updating the same folder", async () => {
+  const sent = [];
+  const { monitor } = makeMonitor(sent, { syncCooldownMs: 1000 });
+
+  for (const [baseId, deviceId] of [[10, "AAAAAAA"], [20, "BBBBBBB"]]) {
+    monitor.handleRemoteChangeDetected({
+      id: baseId,
+      time: new Date().toISOString(),
+      data: { folder: "screenshots", path: `${baseId}.png`, modifiedBy: deviceId }
+    });
+    monitor.handleItemFinished({
+      id: baseId + 1,
+      time: new Date().toISOString(),
+      data: { folder: "screenshots", item: `${baseId}.png`, action: "update", type: "file", error: null }
+    });
+    monitor.handleStateChanged({
+      id: baseId + 2,
+      time: new Date().toISOString(),
+      data: { folder: "screenshots", from: "syncing", to: "idle" }
+    });
+    await sleep(60);
+  }
+
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent.map((entry) => entry.originDeviceNames), [["Consola A"], ["Consola B"]]);
+});
+
+test("cooldown is scoped by folder so another folder still notifies", async () => {
+  const sent = [];
+  const { monitor } = makeMonitor(sent, { syncCooldownMs: 1000 });
+
+  for (const [baseId, folder] of [[10, "screenshots"], [20, "pcsx2"]]) {
+    monitor.handleRemoteChangeDetected({
+      id: baseId,
+      time: new Date().toISOString(),
+      data: { folder, path: `${baseId}.dat`, modifiedBy: "AAAAAAA" }
+    });
+    monitor.handleItemFinished({
+      id: baseId + 1,
+      time: new Date().toISOString(),
+      data: { folder, item: `${baseId}.dat`, action: "update", type: "file", error: null }
+    });
+    monitor.handleStateChanged({
+      id: baseId + 2,
+      time: new Date().toISOString(),
+      data: { folder, from: "syncing", to: "idle" }
+    });
+    await sleep(60);
+  }
+
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent.map((entry) => entry.folderId), ["screenshots", "pcsx2"]);
 });

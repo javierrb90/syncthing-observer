@@ -26,7 +26,7 @@ function baseConfig(overrides = {}) {
   };
 }
 
-test("normal notifications contain folder and count but no filename", () => {
+test("normal notifications start with the device and omit item counts", () => {
   const payload = buildPushoverMessage({
     type: "sync_completed",
     folderName: "(Saves) PCSX2 (PS2)",
@@ -38,9 +38,8 @@ test("normal notifications contain folder and count but no filename", () => {
   }, baseConfig());
 
   assert.equal(payload.title, "Syncthing · (Saves) PCSX2 (PS2)");
-  assert.match(payload.message, /20 elementos sincronizados/);
-  assert.match(payload.message, /Origen: Consola A\./);
-  assert.doesNotMatch(payload.message, /secret-file/);
+  assert.equal(payload.message, "Consola A · Sincronización recibida.");
+  assert.doesNotMatch(payload.message, /20|elemento|secret-file/);
   assert.equal(payload.priority, 0);
   assert.equal(payload.timestamp, 1784980800);
 });
@@ -57,11 +56,11 @@ test("error notifications use high priority and include one diagnostic sample", 
     sampleError: "permission denied"
   }, baseConfig({ pushoverErrorSound: "siren" }));
 
+  assert.equal(payload.title, "Syncthing · Error · Screenshots");
   assert.equal(payload.priority, 1);
   assert.equal(payload.sound, "siren");
-  assert.match(payload.message, /9 elementos sincronizados/);
-  assert.match(payload.message, /1 error detectado/);
-  assert.match(payload.message, /Origen: Consola B\./);
+  assert.match(payload.message, /^Consola B · Error de sincronización\./);
+  assert.doesNotMatch(payload.message, /9 elementos|1 error detectado|Origen:/);
   assert.match(payload.message, /photo\.png/);
   assert.match(payload.message, /permission denied/);
 });
@@ -101,7 +100,7 @@ test("Pushover client validates the JSON status field", async (t) => {
 });
 
 
-test("successful notifications explicitly report an unknown origin when Syncthing provides none", () => {
+test("successful notifications put an unknown-device label first when needed", () => {
   const payload = buildPushoverMessage({
     type: "sync_completed",
     folderName: "Screenshots",
@@ -110,5 +109,5 @@ test("successful notifications explicitly report an unknown origin when Syncthin
     originDeviceNames: []
   }, baseConfig());
 
-  assert.match(payload.message, /Origen: no identificado\./);
+  assert.equal(payload.message, "Dispositivo no identificado · Sincronización recibida.");
 });

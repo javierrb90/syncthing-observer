@@ -9,17 +9,15 @@ function truncate(value, maxLength) {
   return `${text.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
-function itemCountText(count) {
-  return count === 1 ? "1 elemento sincronizado." : `${count} elementos sincronizados.`;
-}
-
-function originText(originDeviceNames, { unknown = false } = {}) {
-  const names = Array.isArray(originDeviceNames)
+function originNames(originDeviceNames) {
+  return Array.isArray(originDeviceNames)
     ? [...new Set(originDeviceNames.map(String).filter(Boolean))]
     : [];
+}
 
-  if (names.length === 0) return unknown ? "Origen: no identificado." : null;
-  return `Origen: ${names.join(", ")}.`;
+function originLead(originDeviceNames) {
+  const names = originNames(originDeviceNames);
+  return names.length > 0 ? names.join(", ") : "Dispositivo no identificado";
 }
 
 export function buildPushoverMessage(notification, config) {
@@ -31,31 +29,14 @@ export function buildPushoverMessage(notification, config) {
 
   if (notification.type === "sync_completed") {
     title = `Syncthing · ${notification.folderName}`;
-    message = [
-      `Actualización recibida en ${instanceName}.`,
-      itemCountText(notification.count || 0),
-      originText(notification.originDeviceNames, { unknown: true })
-    ].join("\n");
+    message = `${originLead(notification.originDeviceNames)} · Sincronización recibida.`;
   } else if (notification.type === "sync_error") {
-    title = `Syncthing · Error`;
+    title = `Syncthing · Error · ${notification.folderName}`;
     priority = 1;
     sound = config.pushoverErrorSound || config.pushoverSound;
 
-    const summary = [];
-    if (notification.count > 0) summary.push(itemCountText(notification.count));
-    if (notification.errorCount > 0) {
-      summary.push(
-        notification.errorCount === 1
-          ? "1 error detectado."
-          : `${notification.errorCount} errores detectados.`
-      );
-    }
-
     message = [
-      notification.folderName,
-      `La sincronización terminó con errores en ${instanceName}.`,
-      ...summary,
-      originText(notification.originDeviceNames),
+      `${originLead(notification.originDeviceNames)} · Error de sincronización.`,
       notification.samplePath ? `Elemento: ${notification.samplePath}` : null,
       notification.sampleError ? `Detalle: ${notification.sampleError}` : null
     ].filter(Boolean).join("\n");

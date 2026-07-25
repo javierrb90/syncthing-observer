@@ -8,6 +8,7 @@ const EMPTY_STATE = Object.freeze({
   lastMainEvent: 0,
   lastDiskEvent: 0,
   folders: {},
+  notificationCooldowns: {},
   outbox: []
 });
 
@@ -45,6 +46,16 @@ function normalizeFolders(folders) {
   );
 }
 
+function normalizeNotificationCooldowns(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([key, timestamp]) => [String(key), Number(timestamp)])
+      .filter(([, timestamp]) => Number.isFinite(timestamp) && timestamp >= 0)
+  );
+}
+
 export async function loadState(file, logger) {
   try {
     const raw = await readFile(file, "utf8");
@@ -59,6 +70,7 @@ export async function loadState(file, logger) {
       lastMainEvent: Number.isInteger(parsed.lastMainEvent) ? parsed.lastMainEvent : 0,
       lastDiskEvent: Number.isInteger(parsed.lastDiskEvent) ? parsed.lastDiskEvent : 0,
       folders: normalizeFolders(parsed.folders),
+      notificationCooldowns: normalizeNotificationCooldowns(parsed.notificationCooldowns),
       outbox: Array.isArray(parsed.outbox)
         ? parsed.outbox.filter((entry) => entry && typeof entry === "object")
         : []

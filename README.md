@@ -11,16 +11,18 @@ The service has no runtime dependencies. It uses Syncthing's event API, a small 
 3. Syncthing Observer sees the completed `ItemFinished` events on the MiniPC.
 4. It correlates them with `RemoteChangeDetected` events to identify the device that originally modified the received version.
 5. When the folder returns to `idle`, the observer waits for the configured quiet period.
-6. If no new activity appears during that period, one Pushover notification is sent for the whole folder update.
+6. If no new activity appears during that period, one Pushover notification is sent for the folder update.
+7. Further successful updates from the same device to the same folder are ignored during the configurable cooldown.
 
 Local filesystem changes discovered on the MiniPC are not monitored. Deleting or editing files directly on the hub therefore does not generate a successful synchronization notification.
 
 ## What it reports
 
 - Received file, directory, symlink, update, and deletion operations applied by the MiniPC's Syncthing instance.
-- One notification per folder update, rather than one notification per file.
-- The number of unique items synchronized; normal notifications do not expose filenames.
+- One notification per settled folder update, rather than one notification per file.
+- A compact message that starts with the Syncthing device name and does not expose filenames or item counts.
 - The Syncthing device name that originated the received version, or all origin devices when a cycle contains changes from several devices.
+- A per-device, per-folder cooldown that suppresses rapid repeated successful notifications without hiding updates to other folders or from other devices.
 - Aggregated synchronization errors, with one sample item and error detail when available.
 - All current and future Syncthing folders automatically.
 
@@ -37,7 +39,7 @@ The observer reloads Syncthing metadata after a `ConfigSaved` event, so newly ad
 
 The observer uses two independent Syncthing event streams. The main `/rest/events` stream watches `ItemFinished`, `StateChanged`, and `ConfigSaved`; the dedicated `/rest/events/disk` stream watches disk-change events and keeps only `RemoteChangeDetected`. That event provides Syncthing's short `modifiedBy` device ID. The observer resolves it against `/rest/config/devices` and uses the configured device name in the Pushover message. Keeping separate cursors is important because Syncthing maintains separate subscriptions and event IDs for different event masks.
 
-`Origen` means the device that originally modified the received file version. It is not necessarily the peer that physically supplied every data block to the MiniPC. If several devices originated files in the same aggregated folder cycle, every unique device name is listed. If Syncthing does not provide enough information for a successful cycle, the notification says `Origen: no identificado.`
+The device name shown at the beginning of the message is the device that originally modified the received file version. It is not necessarily the peer that physically supplied every data block to the MiniPC. If several devices originated files in the same aggregated folder cycle, every unique device name is listed. If Syncthing does not provide enough information, the message begins with `Dispositivo no identificado`.
 
 ## Pushover requirements
 
@@ -76,6 +78,7 @@ Optional variables:
 | `FOLDER_NAMES_JSON` | `{}` | Optional Folder ID to display-name overrides. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, or `silent`. |
 | `QUIET_PERIOD_SECONDS` | `10` | Seconds a folder must remain idle before its notification is queued. |
+| `SYNC_COOLDOWN_SECONDS` | `60` | Suppresses another successful notification from the same device to the same folder during this period. Set to `0` to disable. |
 | `EVENT_TIMEOUT_SECONDS` | `60` | Syncthing long-poll timeout. |
 | `RECONNECT_MIN_DELAY_MS` | `1000` | Initial Syncthing reconnect delay. |
 | `RECONNECT_MAX_DELAY_MS` | `30000` | Maximum Syncthing reconnect delay. |
@@ -95,7 +98,7 @@ The quiet period starts only after Syncthing reports the folder as `idle`.
 
 If ten files are being synchronized and one takes several minutes, the timer does not start until that last file has finished and the folder is idle. If new activity begins during the quiet period, the timer is cancelled and restarted after the folder becomes idle again.
 
-With the default configuration, the result is one notification ten seconds after the complete update has settled.
+With the default configuration, the result is one notification ten seconds after the complete update has settled. After that notification is queued, further successful updates from the same device to the same folder are ignored for sixty seconds. The cooldown is persisted in `state.json`, survives container restarts, and does not suppress synchronization errors. A different device or a different folder can still notify immediately.
 
 ## Notification examples
 
@@ -103,20 +106,14 @@ Successful update:
 
 ```text
 Syncthing · (Saves) PCSX2 (PS2)
-Actualización recibida en MiniPC.
-10 elementos sincronizados.
-Origen: AYN Thor.
+AYN Thor · Sincronización recibida.
 ```
 
 Update with errors:
 
 ```text
-Syncthing · Error
-(Saves) PCSX2 (PS2)
-La sincronización terminó con errores en MiniPC.
-9 elementos sincronizados.
-1 error detectado.
-Origen: AYN Thor.
+Syncthing · Error · (Saves) PCSX2 (PS2)
+AYN Thor · Error de sincronización.
 Elemento: memcards/Mcd001.ps2
 Detalle: permission denied
 ```
@@ -226,6 +223,7 @@ When upgrading from a version that used a single combined cursor, the applicatio
 - The last processed event ID for the main Syncthing stream.
 - The last processed event ID for the disk-change stream.
 - Folder activity that has not yet reached the end of its quiet period.
+- Per-device, per-folder cooldown timestamps.
 - A persistent notification outbox.
 
 When an update is ready, it is written to the outbox before sending it to Pushover. A temporary Pushover outage or a container restart therefore does not discard the notification. State writes use a temporary file and atomic rename.

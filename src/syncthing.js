@@ -101,6 +101,7 @@ export class SyncthingMonitor {
     this.mainConnected = false;
     this.diskConnected = false;
     this.state.outbox ??= [];
+    this.state.notificationCooldowns ??= {};
   }
 
   getStatus() {
@@ -259,14 +260,110 @@ export class SyncthingMonitor {
     };
   }
 
+  cooldownCandidates(notification) {
+    const ids = Array.isArray(notification.originDeviceIds)
+      ? [...new Set(notification.originDeviceIds.map(normalizeDeviceId).filter(Boolean))]
+      : [];
+
+    if (ids.length > 0) {
+      return ids.map((deviceId) => ({
+        key: deviceId,
+        deviceId,
+        deviceName: this.deviceName(deviceId) || deviceId
+      }));
+    }
+
+    const names = Array.isArray(notification.originDeviceNames)
+      ? [...new Set(notification.originDeviceNames.map(String).filter(Boolean))]
+      : [];
+
+    if (names.length > 0) {
+      return names.map((deviceName) => ({
+        key: `name:${normalizeDeviceId(deviceName) || deviceName}`,
+        deviceId: null,
+        deviceName
+      }));
+    }
+
+    return [{
+      key: "unknown",
+      deviceId: null,
+      deviceName: "Dispositivo no identificado"
+    }];
+  }
+
+  applySyncCooldown(notification) {
+    if (notification.type !== "sync_completed" || this.config.syncCooldownMs <= 0) {
+      return { notification, suppressed: false, suppressedOrigins: [] };
+    }
+
+    const now = Date.now();
+    const eligible = [];
+    const suppressed = [];
+
+    for (const candidate of this.cooldownCandidates(notification)) {
+      const cooldownKey = `${notification.folderId}\u0000${candidate.key}`;
+      const lastQueuedAt = Number(this.state.notificationCooldowns[cooldownKey] || 0);
+
+      if (lastQueuedAt > 0 && now - lastQueuedAt < this.config.syncCooldownMs) {
+        suppressed.push({
+          ...candidate,
+          remainingMs: this.config.syncCooldownMs - (now - lastQueuedAt)
+        });
+        continue;
+      }
+
+      eligible.push({ ...candidate, cooldownKey });
+    }
+
+    if (eligible.length === 0) {
+      return { notification, suppressed: true, suppressedOrigins: suppressed };
+    }
+
+    for (const candidate of eligible) {
+      this.state.notificationCooldowns[candidate.cooldownKey] = now;
+    }
+
+    const cutoff = now - Math.max(this.config.syncCooldownMs * 10, 24 * 60 * 60 * 1000);
+    for (const [key, timestamp] of Object.entries(this.state.notificationCooldowns)) {
+      if (Number(timestamp) < cutoff) delete this.state.notificationCooldowns[key];
+    }
+
+    return {
+      notification: {
+        ...notification,
+        originDeviceIds: eligible.map((candidate) => candidate.deviceId).filter(Boolean),
+        originDeviceNames: [...new Set(eligible.map((candidate) => candidate.deviceName))]
+      },
+      suppressed: false,
+      suppressedOrigins: suppressed
+    };
+  }
+
   async flushFolder(folderId) {
     if (this.shutdownSignal.aborted) return;
 
     const folder = getFolderState(this.state, folderId);
     if (!hasPendingActivity(folder)) return;
 
-    const notification = this.buildNotification(folderId, folder);
+    let notification = this.buildNotification(folderId, folder);
     resetFolderActivity(folder);
+
+    const cooldown = this.applySyncCooldown(notification);
+    notification = cooldown.notification;
+
+    if (cooldown.suppressed) {
+      await this.saveState(this.state);
+      this.logger.info("folder_update_suppressed_by_cooldown", {
+        folderId,
+        folderName: notification.folderName,
+        cooldownMs: this.config.syncCooldownMs,
+        origins: cooldown.suppressedOrigins.map((origin) => origin.deviceName),
+        remainingMs: Math.max(...cooldown.suppressedOrigins.map((origin) => origin.remainingMs), 0)
+      });
+      return;
+    }
+
     this.state.outbox.push(notification);
     await this.saveState(this.state);
 
@@ -276,7 +373,8 @@ export class SyncthingMonitor {
       type: notification.type,
       count: notification.count,
       errorCount: notification.errorCount,
-      origins: notification.originDeviceNames
+      origins: notification.originDeviceNames,
+      cooldownSuppressedOrigins: cooldown.suppressedOrigins.map((origin) => origin.deviceName)
     });
 
     void this.drainOutbox();
@@ -509,6 +607,7 @@ export class SyncthingMonitor {
       instanceName: this.instanceName,
       folders: this.folderInfo.size,
       quietPeriodMs: this.config.quietPeriodMs,
+      syncCooldownMs: this.config.syncCooldownMs,
       lastMainEvent: this.state.lastMainEvent,
       lastDiskEvent: this.state.lastDiskEvent
     });

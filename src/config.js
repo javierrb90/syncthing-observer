@@ -68,6 +68,7 @@ export const config = Object.freeze({
   reconnectMinDelayMs: parseInteger("RECONNECT_MIN_DELAY_MS", 1000, { min: 100, max: 60000 }),
   reconnectMaxDelayMs: parseInteger("RECONNECT_MAX_DELAY_MS", 30000, { min: 1000, max: 300000 }),
   quietPeriodMs: parseInteger("QUIET_PERIOD_SECONDS", 10, { min: 0, max: 300 }) * 1000,
+  syncCooldownMs: parseInteger("SYNC_COOLDOWN_SECONDS", 60, { min: 0, max: 86400 }) * 1000,
 
   pushoverApiUrl: (process.env.PUSHOVER_API_URL || "https://api.pushover.net/1/messages.json").trim(),
   pushoverAppToken: process.env.PUSHOVER_APP_TOKEN.trim(),

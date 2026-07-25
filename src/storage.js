@@ -4,10 +4,36 @@ import { dirname } from "node:path";
 const EMPTY_STATE = Object.freeze({
   initialized: false,
   lastMainEvent: 0,
-  lastDiskEvent: 0,
   folders: {},
-  recentNotifications: {}
+  outbox: []
 });
+
+function normalizeFolders(folders) {
+  if (!folders || typeof folders !== "object" || Array.isArray(folders)) return {};
+
+  return Object.fromEntries(
+    Object.entries(folders).map(([folderId, folder]) => [
+      folderId,
+      {
+        state: typeof folder?.state === "string" ? folder.state : "idle",
+        received: {
+          changed: folder?.received?.changed === true,
+          count: Number.isInteger(folder?.received?.count) ? folder.received.count : 0,
+          seen: Array.isArray(folder?.received?.seen) ? folder.received.seen.map(String) : []
+        },
+        errors: {
+          changed: folder?.errors?.changed === true,
+          count: Number.isInteger(folder?.errors?.count) ? folder.errors.count : 0,
+          samplePath: folder?.errors?.samplePath ? String(folder.errors.samplePath) : null,
+          sampleError: folder?.errors?.sampleError ? String(folder.errors.sampleError) : null,
+          seen: Array.isArray(folder?.errors?.seen) ? folder.errors.seen.map(String) : []
+        },
+        lastEventId: Number.isInteger(folder?.lastEventId) ? folder.lastEventId : 0,
+        lastEventTime: typeof folder?.lastEventTime === "string" ? folder.lastEventTime : null
+      }
+    ])
+  );
+}
 
 export async function loadState(file, logger) {
   try {
@@ -17,12 +43,10 @@ export async function loadState(file, logger) {
     return {
       initialized: parsed.initialized === true,
       lastMainEvent: Number.isInteger(parsed.lastMainEvent) ? parsed.lastMainEvent : 0,
-      lastDiskEvent: Number.isInteger(parsed.lastDiskEvent) ? parsed.lastDiskEvent : 0,
-      folders: parsed.folders && typeof parsed.folders === "object" ? parsed.folders : {},
-      recentNotifications:
-        parsed.recentNotifications && typeof parsed.recentNotifications === "object"
-          ? parsed.recentNotifications
-          : {}
+      folders: normalizeFolders(parsed.folders),
+      outbox: Array.isArray(parsed.outbox)
+        ? parsed.outbox.filter((entry) => entry && typeof entry === "object")
+        : []
     };
   } catch (error) {
     if (error?.code !== "ENOENT") {

@@ -1,21 +1,26 @@
 services:
-  syncthing-activity-notifier:
+  syncthing-observer:
     build:
       context: .
-    container_name: syncthing-activity-notifier
+    container_name: syncthing-observer
     restart: unless-stopped
     init: true
-    environment:
-      SYNCTHING_URL: "http://192.168.1.50:8384"
-      SYNCTHING_API_KEY: "idsbxX5nYjmz4hk7Q3nhtPxsuUwANQdj"
-      NOTIFICATIONS_URL: "http://192.168.1.50:3000/api/notifications"
-      STATE_FILE: "/data/state.json"
-      SYNC_DIRECTION: "both"
-      FOLDER_NAMES_JSON: '{"screenshots":"Capturas de pantalla","obsidian":"Obsidian","camera":"Fotos del móvil"}'
-      LOG_LEVEL: "info"
-      DEDUPLICATION_WINDOW_SECONDS: "60"
+    env_file:
+      - .env
+    ports:
+      - "8787:8787"
     volumes:
-      - syncthing-notifier-data:/data
+      - syncthing-observer-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
 volumes:
-  syncthing-notifier-data:
+  syncthing-observer-data:

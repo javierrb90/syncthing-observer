@@ -1,4 +1,10 @@
-const required = ["SYNCTHING_URL", "SYNCTHING_API_KEY", "NOTIFICATIONS_URL"];
+const required = [
+  "SYNCTHING_URL",
+  "SYNCTHING_API_KEY",
+  "PUSHOVER_APP_TOKEN",
+  "PUSHOVER_USER_KEY",
+  "TEST_API_TOKEN"
+];
 
 function parseInteger(name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
   const raw = process.env[name];
@@ -37,9 +43,14 @@ for (const name of required) {
   }
 }
 
-const direction = (process.env.SYNC_DIRECTION || "both").toLowerCase();
-if (!["received", "local", "both"].includes(direction)) {
-  throw new Error("SYNC_DIRECTION must be received, local, or both");
+for (const name of ["PUSHOVER_APP_TOKEN", "PUSHOVER_USER_KEY"]) {
+  if (process.env[name].trim().startsWith("replace-with-")) {
+    throw new Error(`${name} still contains its placeholder value`);
+  }
+}
+
+if (process.env.TEST_API_TOKEN.trim().length < 16) {
+  throw new Error("TEST_API_TOKEN must contain at least 16 characters");
 }
 
 const logLevel = (process.env.LOG_LEVEL || "info").toLowerCase();
@@ -50,16 +61,28 @@ if (!["debug", "info", "warn", "error", "silent"].includes(logLevel)) {
 export const config = Object.freeze({
   syncthingUrl: process.env.SYNCTHING_URL.replace(/\/+$/, ""),
   syncthingApiKey: process.env.SYNCTHING_API_KEY,
-  notificationsUrl: process.env.NOTIFICATIONS_URL,
   stateFile: process.env.STATE_FILE || "/data/state.json",
   folderNames: parseFolderNames(),
-  direction,
   logLevel,
   eventTimeoutSeconds: parseInteger("EVENT_TIMEOUT_SECONDS", 60, { min: 10, max: 300 }),
   reconnectMinDelayMs: parseInteger("RECONNECT_MIN_DELAY_MS", 1000, { min: 100, max: 60000 }),
   reconnectMaxDelayMs: parseInteger("RECONNECT_MAX_DELAY_MS", 30000, { min: 1000, max: 300000 }),
+  quietPeriodMs: parseInteger("QUIET_PERIOD_SECONDS", 10, { min: 0, max: 300 }) * 1000,
+
+  pushoverApiUrl: (process.env.PUSHOVER_API_URL || "https://api.pushover.net/1/messages.json").trim(),
+  pushoverAppToken: process.env.PUSHOVER_APP_TOKEN.trim(),
+  pushoverUserKey: process.env.PUSHOVER_USER_KEY.trim(),
+  pushoverDevice: process.env.PUSHOVER_DEVICE?.trim() || null,
+  pushoverSound: process.env.PUSHOVER_SOUND?.trim() || null,
+  pushoverErrorSound: process.env.PUSHOVER_ERROR_SOUND?.trim() || null,
   notificationTimeoutMs: parseInteger("NOTIFICATION_TIMEOUT_MS", 10000, { min: 1000, max: 120000 }),
-  deduplicationWindowSeconds: parseInteger("DEDUPLICATION_WINDOW_SECONDS", 60, { min: 0, max: 3600 }),
-  notificationAttempts: 5,
-  notificationRetryDelayMs: 5 * 60 * 1000
+  notificationAttempts: parseInteger("NOTIFICATION_ATTEMPTS", 5, { min: 1, max: 10 }),
+  notificationRetryDelayMs:
+    parseInteger("NOTIFICATION_RETRY_DELAY_SECONDS", 60, { min: 1, max: 3600 }) * 1000,
+  outboxRetryDelayMs:
+    parseInteger("OUTBOX_RETRY_DELAY_SECONDS", 300, { min: 10, max: 86400 }) * 1000,
+
+  httpHost: process.env.HTTP_HOST?.trim() || "0.0.0.0",
+  httpPort: parseInteger("HTTP_PORT", 8787, { min: 1, max: 65535 }),
+  testApiToken: process.env.TEST_API_TOKEN.trim()
 });

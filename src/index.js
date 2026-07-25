@@ -1,6 +1,7 @@
 import { config } from "./config.js";
 import { createLogger } from "./logger.js";
 import { createNotificationClient } from "./notifications.js";
+import { createControlServer } from "./server.js";
 import { loadState, createStateWriter } from "./storage.js";
 import { SyncthingMonitor } from "./syncthing.js";
 
@@ -8,6 +9,7 @@ const logger = createLogger(config.logLevel);
 const shutdownController = new AbortController();
 let stopping = false;
 let monitor;
+let controlServer;
 
 async function shutdown(signal) {
   if (stopping) return;
@@ -16,7 +18,11 @@ async function shutdown(signal) {
   logger.info("shutdown_started", { signal });
   shutdownController.abort();
 
-  if (monitor) await monitor.stop();
+  await Promise.allSettled([
+    controlServer?.stop(),
+    monitor?.stop()
+  ]);
+
   logger.info("shutdown_completed");
 }
 
@@ -54,9 +60,19 @@ try {
     shutdownSignal: shutdownController.signal
   });
 
+  controlServer = createControlServer({
+    config,
+    logger,
+    notifications,
+    getStatus: () => monitor.getStatus()
+  });
+
+  await controlServer.start();
+
   logger.info("application_started", {
-    direction: config.direction,
-    stateFile: config.stateFile
+    stateFile: config.stateFile,
+    quietPeriodMs: config.quietPeriodMs,
+    httpPort: config.httpPort
   });
 
   await monitor.run();
@@ -64,5 +80,6 @@ try {
   if (!stopping) {
     logger.error("application_failed", { error: error.message });
     process.exitCode = 1;
+    await shutdown("application_failed");
   }
 }

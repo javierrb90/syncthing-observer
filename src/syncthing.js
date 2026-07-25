@@ -1,53 +1,63 @@
-import { isAbsolute, relative, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const VALID_ACTIONS = new Set(["update", "delete"]);
 const VALID_TYPES = new Set(["file", "dir", "directory", "symlink"]);
+const MAIN_EVENTS = "ItemFinished,StateChanged,ConfigSaved";
 
 function emptyFolderState() {
   return {
     state: "idle",
-    received: { changed: false, count: 0, samplePath: null, seen: [] },
-    local: { changed: false, count: 0, samplePath: null, seen: [] }
+    received: { changed: false, count: 0, seen: [] },
+    errors: {
+      changed: false,
+      count: 0,
+      samplePath: null,
+      sampleError: null,
+      seen: []
+    },
+    lastEventId: 0,
+    lastEventTime: null
   };
 }
 
 function getFolderState(state, folderId) {
   state.folders[folderId] ??= emptyFolderState();
   state.folders[folderId].received ??= emptyFolderState().received;
-  state.folders[folderId].local ??= emptyFolderState().local;
+  state.folders[folderId].errors ??= emptyFolderState().errors;
   return state.folders[folderId];
 }
 
-function resetChange(change) {
-  change.changed = false;
-  change.count = 0;
-  change.samplePath = null;
-  change.seen = [];
+function resetFolderActivity(folder) {
+  folder.received = emptyFolderState().received;
+  folder.errors = emptyFolderState().errors;
+  folder.lastEventId = 0;
+  folder.lastEventTime = null;
 }
 
-function addChange(change, path) {
+function addReceived(folder, path) {
   const key = String(path || "(unknown)");
-  if (change.seen.includes(key)) return;
+  if (folder.received.seen.includes(key)) return;
 
-  change.changed = true;
-  change.count += 1;
-  change.samplePath ??= key;
-  change.seen.push(key);
+  folder.received.changed = true;
+  folder.received.count += 1;
+  folder.received.seen.push(key);
 }
 
-function normalizeRelativePath(rawPath, folderPath) {
-  if (!rawPath) return "(unknown)";
-  const value = String(rawPath);
+function addError(folder, error, path) {
+  const pathKey = String(path || "(folder)");
+  const errorText = String(error || "Folder entered error state");
+  const key = `${pathKey}\u0000${errorText}`;
+  if (folder.errors.seen.includes(key)) return;
 
-  if (folderPath && isAbsolute(value) && isAbsolute(folderPath)) {
-    const result = relative(folderPath, value);
-    if (result && !result.startsWith(`..${sep}`) && result !== "..") {
-      return result;
-    }
-  }
+  folder.errors.changed = true;
+  folder.errors.count += 1;
+  folder.errors.samplePath ??= path ? String(path) : null;
+  folder.errors.sampleError ??= errorText;
+  folder.errors.seen.push(key);
+}
 
-  return value;
+function hasPendingActivity(folder) {
+  return folder.received.changed || folder.errors.changed;
 }
 
 function jitteredBackoff(attempt, min, max) {
@@ -66,9 +76,22 @@ export class SyncthingMonitor {
     this.folderInfo = new Map();
     this.deviceNames = new Map();
     this.instanceId = "unknown";
-    this.instanceName = "Syncthing";
-    this.pendingNotifications = new Set();
-    this.state.recentNotifications ??= {};
+    this.instanceName = "MiniPC";
+    this.quietTimers = new Map();
+    this.outboxRunning = false;
+    this.outboxRetryTimer = null;
+    this.connected = false;
+    this.state.outbox ??= [];
+  }
+
+  getStatus() {
+    return {
+      syncthingConnected: this.connected,
+      instanceId: this.instanceId,
+      instanceName: this.instanceName,
+      folders: this.folderInfo.size,
+      pendingNotifications: this.state.outbox.length
+    };
   }
 
   async request(path, options = {}) {
@@ -95,12 +118,13 @@ export class SyncthingMonitor {
       this.request("/rest/config/devices")
     ]);
 
+    this.folderInfo.clear();
+    this.deviceNames.clear();
     this.instanceId = status.myID || "unknown";
 
     for (const folder of folders) {
       this.folderInfo.set(folder.id, {
-        label: folder.label || folder.id,
-        path: folder.path || null
+        label: folder.label || folder.id
       });
     }
 
@@ -108,137 +132,133 @@ export class SyncthingMonitor {
       this.deviceNames.set(device.deviceID, device.name || device.deviceID);
     }
 
-    this.instanceName = this.deviceNames.get(this.instanceId) || this.instanceId;
+    this.instanceName = this.deviceNames.get(this.instanceId) || this.instanceId || "MiniPC";
   }
 
-  folderName(folderId, eventLabel) {
+  folderName(folderId) {
     return (
       this.config.folderNames[folderId] ||
-      eventLabel ||
       this.folderInfo.get(folderId)?.label ||
       folderId
     );
   }
 
-  async initializeCursors() {
+  async initializeCursor() {
     if (this.state.initialized) return;
 
-    const [mainEvents, diskEvents] = await Promise.all([
-      this.request("/rest/events?since=0&limit=1&timeout=1&events=ItemFinished,StateChanged"),
-      this.request("/rest/events/disk?since=0&limit=1&timeout=1")
-    ]);
+    const events = await this.request(
+      `/rest/events?since=0&limit=1&timeout=1&events=${MAIN_EVENTS}`
+    );
 
-    this.state.lastMainEvent = mainEvents.at(-1)?.id || 0;
-    this.state.lastDiskEvent = diskEvents.at(-1)?.id || 0;
+    this.state.lastMainEvent = events.at(-1)?.id || 0;
     this.state.folders = {};
     this.state.initialized = true;
     await this.saveState(this.state);
 
     this.logger.info("event_history_skipped", {
-      lastMainEvent: this.state.lastMainEvent,
-      lastDiskEvent: this.state.lastDiskEvent
+      lastMainEvent: this.state.lastMainEvent
     });
   }
 
-  queueNotification(payload) {
-    const task = this.notifications.send(payload).finally(() => {
-      this.pendingNotifications.delete(task);
+  cancelQuietTimer(folderId) {
+    const timer = this.quietTimers.get(folderId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.quietTimers.delete(folderId);
+  }
+
+  scheduleQuietFlush(folderId) {
+    const folder = getFolderState(this.state, folderId);
+    if (!hasPendingActivity(folder)) return;
+
+    this.cancelQuietTimer(folderId);
+    const timer = setTimeout(() => {
+      this.quietTimers.delete(folderId);
+      void this.flushFolder(folderId);
+    }, this.config.quietPeriodMs);
+    timer.unref?.();
+    this.quietTimers.set(folderId, timer);
+
+    this.logger.debug("folder_quiet_period_started", {
+      folderId,
+      delayMs: this.config.quietPeriodMs
     });
-    this.pendingNotifications.add(task);
   }
 
-  getLogicalExternalId(folderId, direction, event) {
-    const base = `syncthing:${this.instanceId}:${folderId}:${direction}`;
-    const windowMs = this.config.deduplicationWindowSeconds * 1000;
-    const eventTime = Date.parse(event.time);
-    const now = Number.isFinite(eventTime) ? eventTime : Date.now();
-    const previous = this.state.recentNotifications[base];
-
-    if (
-      windowMs > 0 &&
-      previous &&
-      typeof previous.externalId === "string" &&
-      Number.isFinite(previous.timestamp) &&
-      now - previous.timestamp >= 0 &&
-      now - previous.timestamp <= windowMs
-    ) {
-      previous.timestamp = now;
-      return previous.externalId;
-    }
-
-    const externalId = `${base}:${event.id}`;
-    this.state.recentNotifications[base] = {
-      externalId,
-      timestamp: now
-    };
-
-    const cutoff = now - Math.max(windowMs * 2, 60 * 60 * 1000);
-    for (const [key, value] of Object.entries(this.state.recentNotifications)) {
-      if (!value || !Number.isFinite(value.timestamp) || value.timestamp < cutoff) {
-        delete this.state.recentNotifications[key];
-      }
-    }
-
-    return externalId;
-  }
-
-  buildCompletedPayload(folderId, event, received, local) {
-    const direction =
-      received.changed && local.changed ? "both" :
-      received.changed ? "received" :
-      "local";
-
-    const count = received.count + local.count;
-    const samplePath = received.samplePath || local.samplePath;
-    const folderName = this.folderName(folderId);
+  buildNotification(folderId, folder) {
+    const isError = folder.errors.changed;
+    const timestamp = folder.lastEventTime || new Date().toISOString();
 
     return {
-      source: "syncthing",
-      type: "sync_completed",
-      priority: "normal",
-      title: folderName,
-      subtitle: direction === "received"
-        ? "Synchronization received"
-        : direction === "local"
-          ? "Local changes detected"
-          : "Local and received changes detected",
-      externalId: this.getLogicalExternalId(folderId, direction, event),
-      meta: {
-        folderId,
-        folderName,
-        timestamp: event.time,
-        count,
-        files: samplePath ? [samplePath] : [],
-        direction,
-        instanceId: this.instanceId,
-        instanceName: this.instanceName
-      }
+      id: `syncthing:${this.instanceId}:${folderId}:${folder.lastEventId || Date.now()}`,
+      type: isError ? "sync_error" : "sync_completed",
+      folderId,
+      folderName: this.folderName(folderId),
+      instanceId: this.instanceId,
+      instanceName: this.instanceName,
+      timestamp,
+      count: folder.received.count,
+      errorCount: folder.errors.count,
+      samplePath: folder.errors.samplePath,
+      sampleError: folder.errors.sampleError
     };
   }
 
-  buildErrorPayload(folderId, event, error, path = null) {
-    const folderName = this.folderName(folderId);
-    const externalId = `syncthing:${this.instanceId}:${folderId}:error:${event.id}`;
+  async flushFolder(folderId) {
+    if (this.shutdownSignal.aborted) return;
 
-    return {
-      source: "syncthing",
-      type: "sync_error",
-      priority: "high",
-      title: folderName,
-      subtitle: "Synchronization error",
-      externalId,
-      meta: {
-        folderId,
-        folderName,
-        timestamp: event.time,
-        instanceId: this.instanceId,
-        instanceName: this.instanceName,
-        deviceId: this.instanceId,
-        deviceName: this.instanceName,
-        error: error || "Folder entered error state",
-        ...(path ? { path } : {})
+    const folder = getFolderState(this.state, folderId);
+    if (!hasPendingActivity(folder)) return;
+
+    const notification = this.buildNotification(folderId, folder);
+    resetFolderActivity(folder);
+    this.state.outbox.push(notification);
+    await this.saveState(this.state);
+
+    this.logger.info("folder_update_queued", {
+      folderId,
+      folderName: notification.folderName,
+      type: notification.type,
+      count: notification.count,
+      errorCount: notification.errorCount
+    });
+
+    void this.drainOutbox();
+  }
+
+  scheduleOutboxRetry() {
+    if (this.outboxRetryTimer || this.shutdownSignal.aborted) return;
+    this.outboxRetryTimer = setTimeout(() => {
+      this.outboxRetryTimer = null;
+      void this.drainOutbox();
+    }, this.config.outboxRetryDelayMs);
+    this.outboxRetryTimer.unref?.();
+  }
+
+  async drainOutbox() {
+    if (this.outboxRunning || this.shutdownSignal.aborted) return;
+    this.outboxRunning = true;
+
+    try {
+      while (this.state.outbox.length > 0 && !this.shutdownSignal.aborted) {
+        const notification = this.state.outbox[0];
+        const result = await this.notifications.send(notification);
+
+        if (!result.delivered) {
+          this.logger.warn("outbox_delivery_deferred", {
+            notificationId: notification.id,
+            error: result.error || "delivery_failed"
+          });
+          this.scheduleOutboxRetry();
+          break;
+        }
+
+        this.state.outbox.shift();
+        await this.saveState(this.state);
       }
-    };
+    } finally {
+      this.outboxRunning = false;
+    }
   }
 
   handleItemFinished(event) {
@@ -246,18 +266,22 @@ export class SyncthingMonitor {
     const folderId = data.folder;
     if (!folderId) return;
 
+    const folder = getFolderState(this.state, folderId);
+
     if (data.error) {
-      this.queueNotification(
-        this.buildErrorPayload(folderId, event, String(data.error), data.item || null)
-      );
+      this.cancelQuietTimer(folderId);
+      folder.lastEventId = event.id;
+      folder.lastEventTime = event.time;
+      addError(folder, data.error, data.item || null);
       return;
     }
 
     if (!VALID_ACTIONS.has(data.action) || !VALID_TYPES.has(data.type)) return;
-    if (!["received", "both"].includes(this.config.direction)) return;
 
-    const folder = getFolderState(this.state, folderId);
-    addChange(folder.received, data.item);
+    this.cancelQuietTimer(folderId);
+    folder.lastEventId = event.id;
+    folder.lastEventTime = event.time;
+    addReceived(folder, data.item);
   }
 
   handleStateChanged(event) {
@@ -267,41 +291,40 @@ export class SyncthingMonitor {
 
     const folder = getFolderState(this.state, folderId);
     folder.state = data.to || folder.state;
+    folder.lastEventId = event.id;
+    folder.lastEventTime = event.time;
 
-    if (data.to === "error") {
-      this.queueNotification(this.buildErrorPayload(folderId, event));
-      resetChange(folder.received);
-      resetChange(folder.local);
+    if (data.to !== "idle" && data.to !== "error") {
+      this.cancelQuietTimer(folderId);
       return;
     }
 
-    if (data.to !== "idle") return;
-
-    const received = folder.received;
-    const local = folder.local;
-
-    if (received.changed || local.changed) {
-      this.queueNotification(
-        this.buildCompletedPayload(folderId, event, received, local)
-      );
+    if (data.to === "error" && !folder.errors.changed) {
+      addError(folder, "Folder entered error state", null);
     }
 
-    resetChange(received);
-    resetChange(local);
+    this.scheduleQuietFlush(folderId);
   }
 
-  handleDiskEvent(event) {
-    if (event.type !== "LocalChangeDetected") return;
-    if (!["local", "both"].includes(this.config.direction)) return;
+  async handleConfigSaved() {
+    try {
+      await this.loadMetadata();
+      this.logger.info("syncthing_configuration_reloaded", {
+        folders: this.folderInfo.size
+      });
+    } catch (error) {
+      this.logger.warn("syncthing_configuration_reload_failed", {
+        error: error.message
+      });
+    }
+  }
 
-    const data = event.data || {};
-    const folderId = data.folderID || data.folder;
-    if (!folderId || !VALID_ACTIONS.has(data.action) || !VALID_TYPES.has(data.type)) return;
-
-    const folder = getFolderState(this.state, folderId);
-    const folderPath = this.folderInfo.get(folderId)?.path;
-    const relativePath = normalizeRelativePath(data.path, folderPath);
-    addChange(folder.local, relativePath);
+  resumePendingFolders() {
+    for (const [folderId, folder] of Object.entries(this.state.folders)) {
+      if (hasPendingActivity(folder) && ["idle", "error"].includes(folder.state)) {
+        this.scheduleQuietFlush(folderId);
+      }
+    }
   }
 
   async pollMain() {
@@ -312,21 +335,22 @@ export class SyncthingMonitor {
         const params = new URLSearchParams({
           since: String(this.state.lastMainEvent),
           timeout: String(this.config.eventTimeoutSeconds),
-          events: "ItemFinished,StateChanged"
+          events: MAIN_EVENTS
         });
 
         const events = await this.request(`/rest/events?${params}`);
         reconnectAttempt = 0;
+        this.connected = true;
 
         for (const event of events) {
           this.logger.debug("syncthing_event", {
-            stream: "main",
             id: event.id,
             type: event.type
           });
 
           if (event.type === "ItemFinished") this.handleItemFinished(event);
           else if (event.type === "StateChanged") this.handleStateChanged(event);
+          else if (event.type === "ConfigSaved") await this.handleConfigSaved();
 
           this.state.lastMainEvent = event.id;
         }
@@ -334,57 +358,13 @@ export class SyncthingMonitor {
         if (events.length > 0) await this.saveState(this.state);
       } catch (error) {
         if (this.shutdownSignal.aborted) break;
+        this.connected = false;
         const delay = jitteredBackoff(
           reconnectAttempt++,
           this.config.reconnectMinDelayMs,
           this.config.reconnectMaxDelayMs
         );
         this.logger.warn("syncthing_reconnecting", {
-          stream: "main",
-          delayMs: delay,
-          error: error.message
-        });
-        await sleep(delay, undefined, { signal: this.shutdownSignal }).catch(() => {});
-      }
-    }
-  }
-
-  async pollDisk() {
-    if (!["local", "both"].includes(this.config.direction)) return;
-
-    let reconnectAttempt = 0;
-
-    while (!this.shutdownSignal.aborted) {
-      try {
-        const params = new URLSearchParams({
-          since: String(this.state.lastDiskEvent),
-          timeout: String(this.config.eventTimeoutSeconds)
-        });
-
-        const events = await this.request(`/rest/events/disk?${params}`);
-        reconnectAttempt = 0;
-
-        for (const event of events) {
-          this.logger.debug("syncthing_event", {
-            stream: "disk",
-            id: event.id,
-            type: event.type
-          });
-
-          this.handleDiskEvent(event);
-          this.state.lastDiskEvent = event.id;
-        }
-
-        if (events.length > 0) await this.saveState(this.state);
-      } catch (error) {
-        if (this.shutdownSignal.aborted) break;
-        const delay = jitteredBackoff(
-          reconnectAttempt++,
-          this.config.reconnectMinDelayMs,
-          this.config.reconnectMaxDelayMs
-        );
-        this.logger.warn("syncthing_reconnecting", {
-          stream: "disk",
           delayMs: delay,
           error: error.message
         });
@@ -395,19 +375,24 @@ export class SyncthingMonitor {
 
   async run() {
     await this.loadMetadata();
-    await this.initializeCursors();
+    await this.initializeCursor();
+    this.connected = true;
 
     this.logger.info("syncthing_connected", {
       instanceId: this.instanceId,
       instanceName: this.instanceName,
-      direction: this.config.direction,
-      folders: this.folderInfo.size
+      folders: this.folderInfo.size,
+      quietPeriodMs: this.config.quietPeriodMs
     });
 
-    await Promise.all([this.pollMain(), this.pollDisk()]);
+    this.resumePendingFolders();
+    void this.drainOutbox();
+    await this.pollMain();
   }
 
   async stop() {
+    for (const folderId of this.quietTimers.keys()) this.cancelQuietTimer(folderId);
+    if (this.outboxRetryTimer) clearTimeout(this.outboxRetryTimer);
     await this.saveState(this.state).catch(() => {});
   }
 }

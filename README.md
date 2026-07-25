@@ -1,140 +1,161 @@
-# Syncthing Activity Notifier
+# Syncthing Observer
 
-Small Node.js 22 service that listens to Syncthing through long polling and sends one notification per updated folder to a LAN notification center.
+Small Node.js 22 service for a central Syncthing hub. It watches files that the monitored Syncthing instance receives from other devices and sends one Pushover notification after the affected folder has finished synchronizing.
 
-It has no runtime dependencies, exposes no ports, uses no periodic folder-state polling, and is ready to deploy with Docker or Portainer.
+The service has no runtime dependencies. It uses Syncthing's event API, a small built-in HTTP control server, persistent state, and a persistent notification outbox.
+
+## Intended workflow
+
+1. A console, computer, phone, or tablet changes a save file or screenshot.
+2. Syncthing uploads the change to the MiniPC acting as the central hub.
+3. Syncthing Observer sees the completed `ItemFinished` events on the MiniPC.
+4. When the folder returns to `idle`, the observer waits for the configured quiet period.
+5. If no new activity appears during that period, one Pushover notification is sent for the whole folder update.
+
+Local filesystem changes discovered on the MiniPC are not monitored. Deleting or editing files directly on the hub therefore does not generate a successful synchronization notification.
 
 ## What it reports
 
-- Received creations, modifications and deletions applied by the monitored Syncthing instance.
-- Local creations, modifications and deletions detected by Syncthing.
-- Files, directories and symlinks.
-- Folder synchronization errors.
-- One notification when the folder returns to `idle`.
-- At most one sample path in `meta.files`.
-
-Metadata-only changes are ignored.
-
-`local` means that Syncthing detected a local filesystem change. It does not claim that every remote device has already downloaded it.
-
-## Required configuration
-
-| Variable | Description |
-|---|---|
-| `SYNCTHING_URL` | Syncthing GUI/API URL, without a trailing slash. |
-| `SYNCTHING_API_KEY` | Syncthing API key. |
-| `NOTIFICATIONS_URL` | Full endpoint, normally `http://kiosko.local:3000/api/notifications`. |
-
-## Optional configuration
-
-| Variable | Default | Description |
-|---|---:|---|
-| `STATE_FILE` | `/data/state.json` | Persistent state path. |
-| `SYNC_DIRECTION` | `both` | `received`, `local`, or `both`. |
-| `FOLDER_NAMES_JSON` | `{}` | JSON map from Folder ID to friendly name. |
-| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, or `silent`. |
-| `EVENT_TIMEOUT_SECONDS` | `60` | Syncthing long-poll timeout. |
-| `RECONNECT_MIN_DELAY_MS` | `1000` | Initial reconnect delay. |
-| `RECONNECT_MAX_DELAY_MS` | `30000` | Maximum reconnect delay. |
-| `NOTIFICATION_TIMEOUT_MS` | `10000` | Timeout for each notification request. |
-| `DEDUPLICATION_WINDOW_SECONDS` | `60` | Reuses the same `externalId` for consecutive completions of the same folder and direction inside this rolling window. Set to `0` to disable. |
+- Received file, directory, symlink, update, and deletion operations applied by the MiniPC's Syncthing instance.
+- One notification per folder update, rather than one notification per file.
+- The number of unique items synchronized; normal notifications do not expose filenames.
+- Aggregated synchronization errors, with one sample item and error detail when available.
+- All current and future Syncthing folders automatically.
 
 Folder names are resolved in this order:
 
-1. `FOLDER_NAMES_JSON`
-2. Syncthing folder label
-3. Folder ID
+1. `FOLDER_NAMES_JSON`, when an explicit override exists.
+2. The label configured in Syncthing.
+3. The Syncthing Folder ID.
 
-## Direction modes
+The observer reloads Syncthing metadata after a `ConfigSaved` event, so newly added folders and renamed labels are picked up without changing the application.
 
-```text
-received  Changes downloaded and applied by this Syncthing instance
-local     Changes detected on the local filesystem
-both      Both categories
-```
+## Pushover requirements
 
-When both categories occur before the same return to `idle`, they are combined into one notification with `meta.direction` set to `both`.
+You need two values from your Pushover account:
 
-## First start
+- `PUSHOVER_APP_TOKEN`: create an application in the Pushover dashboard and copy its API token.
+- `PUSHOVER_USER_KEY`: copy your user key from the Pushover dashboard.
 
-On the first start, the service requests only the latest buffered event ID from each Syncthing event stream and stores it without generating notifications. Historical events are therefore ignored.
+`PUSHOVER_DEVICE` is optional. Leave it blank to deliver the message to all active devices registered under that user key. Set it to a Pushover device name to restrict delivery.
 
-Subsequent starts continue from the persisted IDs.
+Successful updates use normal priority (`0`). Synchronization errors use high priority (`1`). Optional sound overrides can be configured separately.
 
-## Notification example
+## Configuration
 
-```json
-{
-  "source": "syncthing",
-  "type": "sync_completed",
-  "priority": "normal",
-  "title": "Capturas de pantalla",
-  "subtitle": "Synchronization received",
-  "externalId": "syncthing:DEVICE_ID:screenshots:received:184563",
-  "meta": {
-    "folderId": "screenshots",
-    "folderName": "Capturas de pantalla",
-    "timestamp": "2026-07-10T21:13:42+02:00",
-    "count": 3,
-    "files": [
-      "Pantalla 1.png"
-    ],
-    "direction": "received",
-    "instanceId": "DEVICE_ID",
-    "instanceName": "MiniPC"
-  }
-}
-```
-
-The notifier uses `externalId` so retries are safely deduplicated by Kiosko Media Center.
-
-
-## Temporal deduplication
-
-Some workflows produce two real Syncthing cycles for one user action. A common example is:
-
-1. a file is received;
-2. another process immediately moves it;
-3. Syncthing detects and synchronizes the move.
-
-Those cycles have different Syncthing event IDs, so event-ID idempotency alone cannot identify them as one logical update.
-
-The notifier therefore keeps a rolling deduplication window per instance, folder and direction. Consecutive completions inside `DEDUPLICATION_WINDOW_SECONDS` reuse the same `externalId`. Kiosko Media Center then returns the existing notification instead of creating another toast.
-
-The default is 60 seconds:
-
-```env
-DEDUPLICATION_WINDOW_SECONDS=60
-```
-
-A new completion inside the window extends the window from that event. The mapping is persisted in `state.json`, so a notifier restart does not immediately reintroduce the duplicate.
-
-## Retry behavior
-
-A failed notification is attempted at most five times:
-
-- first attempt immediately;
-- four further attempts;
-- five minutes between attempts.
-
-HTTP `429` and `5xx` responses are retried. Other `4xx` responses are treated as permanent errors. Retries are kept only in memory.
-
-
-## Local development
-
-Copy the example environment file:
+Copy the example file:
 
 ```bash
 cp .env.example .env
 ```
 
-On Windows PowerShell:
+Required variables:
 
-```powershell
-Copy-Item .env.example .env
+| Variable | Description |
+|---|---|
+| `SYNCTHING_URL` | Syncthing GUI/API URL without a trailing slash. |
+| `SYNCTHING_API_KEY` | Syncthing API key. |
+| `PUSHOVER_APP_TOKEN` | Pushover application API token. |
+| `PUSHOVER_USER_KEY` | Pushover user or group key. |
+| `TEST_API_TOKEN` | Secret protecting the HTTP notification test endpoint; at least 16 characters. |
+
+Optional variables:
+
+| Variable | Default | Description |
+|---|---:|---|
+| `STATE_FILE` | `/data/state.json` | Persistent state and notification outbox. |
+| `FOLDER_NAMES_JSON` | `{}` | Optional Folder ID to display-name overrides. |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, or `silent`. |
+| `QUIET_PERIOD_SECONDS` | `10` | Seconds a folder must remain idle before its notification is queued. |
+| `EVENT_TIMEOUT_SECONDS` | `60` | Syncthing long-poll timeout. |
+| `RECONNECT_MIN_DELAY_MS` | `1000` | Initial Syncthing reconnect delay. |
+| `RECONNECT_MAX_DELAY_MS` | `30000` | Maximum Syncthing reconnect delay. |
+| `PUSHOVER_DEVICE` | empty | Optional specific Pushover device. |
+| `PUSHOVER_SOUND` | empty | Optional sound for successful updates. |
+| `PUSHOVER_ERROR_SOUND` | empty | Optional sound for synchronization errors. |
+| `NOTIFICATION_TIMEOUT_MS` | `10000` | Timeout for one Pushover API request. |
+| `NOTIFICATION_ATTEMPTS` | `5` | Attempts made before leaving a message in the outbox. |
+| `NOTIFICATION_RETRY_DELAY_SECONDS` | `60` | Delay between Pushover API attempts. |
+| `OUTBOX_RETRY_DELAY_SECONDS` | `300` | Delay before retrying an undelivered outbox message. |
+| `HTTP_HOST` | `0.0.0.0` | Address for the control server. |
+| `HTTP_PORT` | `8787` | Control-server port. |
+
+## Quiet-period behavior
+
+The quiet period starts only after Syncthing reports the folder as `idle`.
+
+If ten files are being synchronized and one takes several minutes, the timer does not start until that last file has finished and the folder is idle. If new activity begins during the quiet period, the timer is cancelled and restarted after the folder becomes idle again.
+
+With the default configuration, the result is one notification ten seconds after the complete update has settled.
+
+## Notification examples
+
+Successful update:
+
+```text
+Syncthing · (Saves) PCSX2 (PS2)
+Actualización recibida en MiniPC.
+10 elementos sincronizados.
 ```
 
-Edit `.env` and run:
+Update with errors:
+
+```text
+Syncthing · Error
+(Saves) PCSX2 (PS2)
+La sincronización terminó con errores en MiniPC.
+9 elementos sincronizados.
+1 error detectado.
+Elemento: memcards/Mcd001.ps2
+Detalle: permission denied
+```
+
+## Testing Pushover with curl
+
+The application exposes a fixed protected test action. It does not allow arbitrary notification text.
+
+From the Docker host:
+
+```bash
+curl -X POST http://127.0.0.1:8787/test-notification \
+  -H "Authorization: Bearer YOUR_TEST_API_TOKEN"
+```
+
+Alternatively:
+
+```bash
+curl -X POST http://127.0.0.1:8787/test-notification \
+  -H "X-Test-Token: YOUR_TEST_API_TOKEN"
+```
+
+Successful response:
+
+```json
+{"ok":true,"message":"Pushover test notification sent","requestId":"..."}
+```
+
+An invalid Pushover token or user key produces HTTP `502` with the error returned by Pushover. A missing or invalid test token produces HTTP `401`.
+
+Health check:
+
+```bash
+curl http://127.0.0.1:8787/health
+```
+
+Example response:
+
+```json
+{
+  "ok": true,
+  "syncthingConnected": true,
+  "instanceId": "DEVICE-ID",
+  "instanceName": "MiniPC",
+  "folders": 20,
+  "pendingNotifications": 0
+}
+```
+
+## Local development
 
 ```bash
 npm start
@@ -146,32 +167,16 @@ The start command uses Node.js 22 native environment-file support:
 node --env-file-if-exists=.env src/index.js
 ```
 
-If `.env` does not exist, the service uses environment variables provided by the operating system or Docker.
+Syntax and automated tests:
+
+```bash
+npm run check
+npm test
+```
 
 ## Docker Compose
 
-Edit `docker-compose.yml`, especially the API key:
-
-```yaml
-services:
-  syncthing-activity-notifier:
-    build:
-      context: .
-    restart: unless-stopped
-    init: true
-    environment:
-      SYNCTHING_URL: "http://ssrb.local:8384"
-      SYNCTHING_API_KEY: "REPLACE_WITH_YOUR_API_KEY"
-      NOTIFICATIONS_URL: "http://kiosko.local:3000/api/notifications"
-      SYNC_DIRECTION: "both"
-      FOLDER_NAMES_JSON: '{"screenshots":"Capturas de pantalla"}'
-      LOG_LEVEL: "info"
-      DEDUPLICATION_WINDOW_SECONDS: "60"
-    volumes:
-      - syncthing-notifier-data:/data
-```
-
-Build and start:
+Fill in `.env`, then build and start:
 
 ```bash
 docker compose up -d --build
@@ -180,45 +185,28 @@ docker compose up -d --build
 View logs:
 
 ```bash
-docker compose logs -f
+docker compose logs -f syncthing-observer
 ```
 
-## Portainer
+Run the Pushover test from the Docker host after the health endpoint responds.
 
-1. Create a Git repository containing this project, or upload it to a location Portainer can build from.
-2. Create a new Stack.
-3. Use the included `docker-compose.yml`.
-4. Replace `SYNCTHING_API_KEY` and adjust the URLs and folder-name mapping.
-5. Deploy the stack.
+## First start
 
-No port mapping is required.
+On its first start, the observer requests only the latest buffered relevant event ID and persists it without generating notifications. Historical Syncthing events are ignored.
 
-## State
+## Persistent state and delivery
 
-The persistent file contains:
+`state.json` contains:
 
-```json
-{
-  "initialized": true,
-  "lastMainEvent": 184563,
-  "lastDiskEvent": 922,
-  "folders": {}
-}
-```
+- The last processed Syncthing event ID.
+- Folder activity that has not yet reached the end of its quiet period.
+- A persistent notification outbox.
 
-Open folder activity is also persisted so a container restart does not discard a synchronization already in progress.
+When an update is ready, it is written to the outbox before sending it to Pushover. A temporary Pushover outage or a container restart therefore does not discard the notification. State writes use a temporary file and atomic rename.
 
-State writes are atomic through a temporary file and rename.
+## Security notes
 
-## Logs
-
-Logs are minimal JSON lines suitable for Docker and Portainer. Individual Syncthing events are logged only when `LOG_LEVEL=debug`.
-
-## Notes
-
+- Keep `.env` outside version control.
+- Do not hardcode the Syncthing API key or Pushover keys in `docker-compose.yml`.
+- Keep port `8787` on the trusted LAN and use a long random `TEST_API_TOKEN`.
 - Syncthing API authentication uses the `X-API-Key` header.
-- The service monitors all configured folders.
-- `ItemFinished` actions marked as `metadata` are ignored.
-- Successful `update` and `delete` actions are counted.
-- Folder and directory changes are included.
-- Error notifications identify the monitored Syncthing instance. Syncthing's `ItemFinished` and folder-state error events do not always identify a remote peer.

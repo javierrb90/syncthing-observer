@@ -45,6 +45,8 @@ function makeMonitor(sent) {
   monitor.instanceId = "MINIPC-ID";
   monitor.instanceName = "MiniPC";
   monitor.folderInfo.set("pcsx2", { label: "(Saves) PCSX2 (PS2)" });
+  monitor.deviceNamesByShortId.set("AAAAAAA", "Consola A");
+  monitor.deviceNamesByShortId.set("BBBBBBB", "Consola B");
   return { monitor, state, shutdownController };
 }
 
@@ -52,18 +54,29 @@ test("multiple received items become one notification after the folder stays idl
   const sent = [];
   const { monitor } = makeMonitor(sent);
 
-  monitor.handleItemFinished({
+  monitor.handleRemoteChangeDetected({
     id: 1,
+    time: "2026-07-25T11:59:59Z",
+    data: {
+      folder: "pcsx2",
+      path: "a.ps2",
+      action: "modified",
+      type: "file",
+      modifiedBy: "AAAAAAA"
+    }
+  });
+  monitor.handleItemFinished({
+    id: 2,
     time: "2026-07-25T12:00:00Z",
     data: { folder: "pcsx2", item: "a.ps2", action: "update", type: "file", error: null }
   });
   monitor.handleItemFinished({
-    id: 2,
+    id: 3,
     time: "2026-07-25T12:00:01Z",
     data: { folder: "pcsx2", item: "b.ps2", action: "update", type: "file", error: null }
   });
   monitor.handleStateChanged({
-    id: 3,
+    id: 4,
     time: "2026-07-25T12:00:02Z",
     data: { folder: "pcsx2", from: "syncing", to: "idle" }
   });
@@ -74,6 +87,8 @@ test("multiple received items become one notification after the folder stays idl
   assert.equal(sent[0].type, "sync_completed");
   assert.equal(sent[0].count, 2);
   assert.equal(sent[0].folderName, "(Saves) PCSX2 (PS2)");
+  assert.deepEqual(sent[0].originDeviceNames, ["Consola A"]);
+  assert.deepEqual(sent[0].originDeviceIds, ["AAAAAAA"]);
 });
 
 test("new activity during the quiet period postpones and aggregates the notification", async () => {
@@ -108,4 +123,42 @@ test("new activity during the quiet period postpones and aggregates the notifica
 
   assert.equal(sent.length, 1);
   assert.equal(sent[0].count, 2);
+});
+
+
+test("multiple origin devices are deduplicated and resolved from Syncthing names", async () => {
+  const sent = [];
+  const { monitor } = makeMonitor(sent);
+
+  monitor.handleItemFinished({
+    id: 1,
+    time: "2026-07-25T12:00:00Z",
+    data: { folder: "pcsx2", item: "a.ps2", action: "update", type: "file", error: null }
+  });
+  monitor.handleRemoteChangeDetected({
+    id: 2,
+    time: "2026-07-25T12:00:01Z",
+    data: { folder: "pcsx2", path: "a.ps2", modifiedBy: "AAAAAAA" }
+  });
+  monitor.handleRemoteChangeDetected({
+    id: 3,
+    time: "2026-07-25T12:00:02Z",
+    data: { folder: "pcsx2", path: "b.ps2", modifiedBy: "BBBBBBB" }
+  });
+  monitor.handleRemoteChangeDetected({
+    id: 4,
+    time: "2026-07-25T12:00:03Z",
+    data: { folder: "pcsx2", path: "c.ps2", modifiedBy: "AAAAAAA" }
+  });
+  monitor.handleStateChanged({
+    id: 5,
+    time: "2026-07-25T12:00:04Z",
+    data: { folder: "pcsx2", from: "syncing", to: "idle" }
+  });
+
+  await sleep(60);
+
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].originDeviceNames, ["Consola A", "Consola B"]);
+  assert.deepEqual(sent[0].originDeviceIds, ["AAAAAAA", "BBBBBBB"]);
 });

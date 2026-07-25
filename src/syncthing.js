@@ -2,7 +2,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 const VALID_ACTIONS = new Set(["update", "delete"]);
 const VALID_TYPES = new Set(["file", "dir", "directory", "symlink"]);
-const MAIN_EVENTS = "ItemFinished,StateChanged,ConfigSaved";
+
+function normalizeDeviceId(value) {
+  return String(value || "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
+}
+
+const MAIN_EVENTS = "ItemFinished,RemoteChangeDetected,StateChanged,ConfigSaved";
 
 function emptyFolderState() {
   return {
@@ -15,6 +20,7 @@ function emptyFolderState() {
       sampleError: null,
       seen: []
     },
+    origins: { deviceIds: [] },
     lastEventId: 0,
     lastEventTime: null
   };
@@ -24,12 +30,14 @@ function getFolderState(state, folderId) {
   state.folders[folderId] ??= emptyFolderState();
   state.folders[folderId].received ??= emptyFolderState().received;
   state.folders[folderId].errors ??= emptyFolderState().errors;
+  state.folders[folderId].origins ??= emptyFolderState().origins;
   return state.folders[folderId];
 }
 
 function resetFolderActivity(folder) {
   folder.received = emptyFolderState().received;
   folder.errors = emptyFolderState().errors;
+  folder.origins = emptyFolderState().origins;
   folder.lastEventId = 0;
   folder.lastEventTime = null;
 }
@@ -56,6 +64,14 @@ function addError(folder, error, path) {
   folder.errors.seen.push(key);
 }
 
+function addOrigin(folder, deviceId) {
+  const normalized = normalizeDeviceId(deviceId);
+  if (!normalized || folder.origins.deviceIds.includes(normalized)) return false;
+
+  folder.origins.deviceIds.push(normalized);
+  return true;
+}
+
 function hasPendingActivity(folder) {
   return folder.received.changed || folder.errors.changed;
 }
@@ -75,6 +91,7 @@ export class SyncthingMonitor {
     this.shutdownSignal = shutdownSignal;
     this.folderInfo = new Map();
     this.deviceNames = new Map();
+    this.deviceNamesByShortId = new Map();
     this.instanceId = "unknown";
     this.instanceName = "MiniPC";
     this.quietTimers = new Map();
@@ -120,6 +137,7 @@ export class SyncthingMonitor {
 
     this.folderInfo.clear();
     this.deviceNames.clear();
+    this.deviceNamesByShortId.clear();
     this.instanceId = status.myID || "unknown";
 
     for (const folder of folders) {
@@ -129,10 +147,24 @@ export class SyncthingMonitor {
     }
 
     for (const device of devices) {
-      this.deviceNames.set(device.deviceID, device.name || device.deviceID);
+      const normalizedId = normalizeDeviceId(device.deviceID);
+      const displayName = device.name || device.deviceID;
+      this.deviceNames.set(normalizedId, displayName);
+      if (normalizedId) this.deviceNamesByShortId.set(normalizedId.slice(0, 7), displayName);
     }
 
-    this.instanceName = this.deviceNames.get(this.instanceId) || this.instanceId || "MiniPC";
+    this.instanceName = this.deviceName(this.instanceId) || this.instanceId || "MiniPC";
+  }
+
+  deviceName(deviceId) {
+    const normalized = normalizeDeviceId(deviceId);
+    if (!normalized) return null;
+
+    return (
+      this.deviceNames.get(normalized) ||
+      this.deviceNamesByShortId.get(normalized.slice(0, 7)) ||
+      (normalized.length <= 7 ? normalized : String(deviceId))
+    );
   }
 
   folderName(folderId) {
@@ -189,6 +221,11 @@ export class SyncthingMonitor {
     const isError = folder.errors.changed;
     const timestamp = folder.lastEventTime || new Date().toISOString();
 
+    const originDeviceIds = [...folder.origins.deviceIds];
+    const originDeviceNames = [...new Set(
+      originDeviceIds.map((deviceId) => this.deviceName(deviceId)).filter(Boolean)
+    )];
+
     return {
       id: `syncthing:${this.instanceId}:${folderId}:${folder.lastEventId || Date.now()}`,
       type: isError ? "sync_error" : "sync_completed",
@@ -199,6 +236,8 @@ export class SyncthingMonitor {
       timestamp,
       count: folder.received.count,
       errorCount: folder.errors.count,
+      originDeviceIds,
+      originDeviceNames,
       samplePath: folder.errors.samplePath,
       sampleError: folder.errors.sampleError
     };
@@ -220,7 +259,8 @@ export class SyncthingMonitor {
       folderName: notification.folderName,
       type: notification.type,
       count: notification.count,
-      errorCount: notification.errorCount
+      errorCount: notification.errorCount,
+      origins: notification.originDeviceNames
     });
 
     void this.drainOutbox();
@@ -282,6 +322,29 @@ export class SyncthingMonitor {
     folder.lastEventId = event.id;
     folder.lastEventTime = event.time;
     addReceived(folder, data.item);
+  }
+
+  handleRemoteChangeDetected(event) {
+    const data = event.data || {};
+    const folderId = data.folder;
+    if (!folderId || !data.modifiedBy) return;
+
+    const folder = getFolderState(this.state, folderId);
+    if (!addOrigin(folder, data.modifiedBy)) return;
+
+    folder.lastEventId = event.id;
+    folder.lastEventTime = event.time;
+
+    this.logger.debug("remote_change_origin_detected", {
+      folderId,
+      deviceId: normalizeDeviceId(data.modifiedBy).slice(0, 7),
+      deviceName: this.deviceName(data.modifiedBy),
+      path: data.path || null
+    });
+
+    if (hasPendingActivity(folder) && ["idle", "error"].includes(folder.state)) {
+      this.scheduleQuietFlush(folderId);
+    }
   }
 
   handleStateChanged(event) {
@@ -349,6 +412,7 @@ export class SyncthingMonitor {
           });
 
           if (event.type === "ItemFinished") this.handleItemFinished(event);
+          else if (event.type === "RemoteChangeDetected") this.handleRemoteChangeDetected(event);
           else if (event.type === "StateChanged") this.handleStateChanged(event);
           else if (event.type === "ConfigSaved") await this.handleConfigSaved();
 

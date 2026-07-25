@@ -9,8 +9,9 @@ The service has no runtime dependencies. It uses Syncthing's event API, a small 
 1. A console, computer, phone, or tablet changes a save file or screenshot.
 2. Syncthing uploads the change to the MiniPC acting as the central hub.
 3. Syncthing Observer sees the completed `ItemFinished` events on the MiniPC.
-4. When the folder returns to `idle`, the observer waits for the configured quiet period.
-5. If no new activity appears during that period, one Pushover notification is sent for the whole folder update.
+4. It correlates them with `RemoteChangeDetected` events to identify the device that originally modified the received version.
+5. When the folder returns to `idle`, the observer waits for the configured quiet period.
+6. If no new activity appears during that period, one Pushover notification is sent for the whole folder update.
 
 Local filesystem changes discovered on the MiniPC are not monitored. Deleting or editing files directly on the hub therefore does not generate a successful synchronization notification.
 
@@ -19,6 +20,7 @@ Local filesystem changes discovered on the MiniPC are not monitored. Deleting or
 - Received file, directory, symlink, update, and deletion operations applied by the MiniPC's Syncthing instance.
 - One notification per folder update, rather than one notification per file.
 - The number of unique items synchronized; normal notifications do not expose filenames.
+- The Syncthing device name that originated the received version, or all origin devices when a cycle contains changes from several devices.
 - Aggregated synchronization errors, with one sample item and error detail when available.
 - All current and future Syncthing folders automatically.
 
@@ -28,7 +30,14 @@ Folder names are resolved in this order:
 2. The label configured in Syncthing.
 3. The Syncthing Folder ID.
 
-The observer reloads Syncthing metadata after a `ConfigSaved` event, so newly added folders and renamed labels are picked up without changing the application.
+The observer reloads Syncthing metadata after a `ConfigSaved` event, so newly added folders, devices, and renamed labels or device names are picked up without changing the application. Device names come directly from Syncthing; no device mapping is required in `.env`.
+
+
+## Device-origin detection
+
+The observer explicitly subscribes to Syncthing's `RemoteChangeDetected` event in addition to `ItemFinished` and `StateChanged`. The event provides Syncthing's short `modifiedBy` device ID. The observer resolves it against `/rest/config/devices` and uses the configured device name in the Pushover message.
+
+`Origen` means the device that originally modified the received file version. It is not necessarily the peer that physically supplied every data block to the MiniPC. If several devices originated files in the same aggregated folder cycle, every unique device name is listed. If Syncthing does not provide enough information for a successful cycle, the notification says `Origen: no identificado.`
 
 ## Pushover requirements
 
@@ -96,6 +105,7 @@ Successful update:
 Syncthing · (Saves) PCSX2 (PS2)
 Actualización recibida en MiniPC.
 10 elementos sincronizados.
+Origen: AYN Thor.
 ```
 
 Update with errors:
@@ -106,6 +116,7 @@ Syncthing · Error
 La sincronización terminó con errores en MiniPC.
 9 elementos sincronizados.
 1 error detectado.
+Origen: AYN Thor.
 Elemento: memcards/Mcd001.ps2
 Detalle: permission denied
 ```
@@ -206,7 +217,8 @@ When an update is ready, it is written to the outbox before sending it to Pushov
 
 ## Security notes
 
-- Keep `.env` outside version control.
+- This private repository intentionally tracks `.env`; `.gitignore` does not exclude it. Never make the repository public while it contains real credentials.
+- `.dockerignore` still excludes `.env`, so the credentials are injected by Docker Compose at runtime rather than copied into the image.
 - Do not hardcode the Syncthing API key or Pushover keys in `docker-compose.yml`.
 - Keep port `8787` on the trusted LAN and use a long random `TEST_API_TOKEN`.
 - Syncthing API authentication uses the `X-API-Key` header.

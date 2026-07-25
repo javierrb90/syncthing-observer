@@ -13,6 +13,15 @@ function itemCountText(count) {
   return count === 1 ? "1 elemento sincronizado." : `${count} elementos sincronizados.`;
 }
 
+function originText(originDeviceNames, { unknown = false } = {}) {
+  const names = Array.isArray(originDeviceNames)
+    ? [...new Set(originDeviceNames.map(String).filter(Boolean))]
+    : [];
+
+  if (names.length === 0) return unknown ? "Origen: no identificado." : null;
+  return `Origen: ${names.join(", ")}.`;
+}
+
 export function buildPushoverMessage(notification, config) {
   const instanceName = notification.instanceName || "MiniPC";
   let title;
@@ -24,7 +33,8 @@ export function buildPushoverMessage(notification, config) {
     title = `Syncthing · ${notification.folderName}`;
     message = [
       `Actualización recibida en ${instanceName}.`,
-      itemCountText(notification.count || 0)
+      itemCountText(notification.count || 0),
+      originText(notification.originDeviceNames, { unknown: true })
     ].join("\n");
   } else if (notification.type === "sync_error") {
     title = `Syncthing · Error`;
@@ -45,6 +55,7 @@ export function buildPushoverMessage(notification, config) {
       notification.folderName,
       `La sincronización terminó con errores en ${instanceName}.`,
       ...summary,
+      originText(notification.originDeviceNames),
       notification.samplePath ? `Elemento: ${notification.samplePath}` : null,
       notification.sampleError ? `Detalle: ${notification.sampleError}` : null
     ].filter(Boolean).join("\n");

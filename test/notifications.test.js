@@ -32,12 +32,14 @@ test("normal notifications contain folder and count but no filename", () => {
     folderName: "(Saves) PCSX2 (PS2)",
     instanceName: "MiniPC",
     count: 20,
+    originDeviceNames: ["Consola A"],
     samplePath: "secret-file.ps2",
     timestamp: "2026-07-25T12:00:00Z"
   }, baseConfig());
 
   assert.equal(payload.title, "Syncthing · (Saves) PCSX2 (PS2)");
   assert.match(payload.message, /20 elementos sincronizados/);
+  assert.match(payload.message, /Origen: Consola A\./);
   assert.doesNotMatch(payload.message, /secret-file/);
   assert.equal(payload.priority, 0);
   assert.equal(payload.timestamp, 1784980800);
@@ -50,6 +52,7 @@ test("error notifications use high priority and include one diagnostic sample", 
     instanceName: "MiniPC",
     count: 9,
     errorCount: 1,
+    originDeviceNames: ["Consola B"],
     samplePath: "photo.png",
     sampleError: "permission denied"
   }, baseConfig({ pushoverErrorSound: "siren" }));
@@ -58,6 +61,7 @@ test("error notifications use high priority and include one diagnostic sample", 
   assert.equal(payload.sound, "siren");
   assert.match(payload.message, /9 elementos sincronizados/);
   assert.match(payload.message, /1 error detectado/);
+  assert.match(payload.message, /Origen: Consola B\./);
   assert.match(payload.message, /photo\.png/);
   assert.match(payload.message, /permission denied/);
 });
@@ -94,4 +98,17 @@ test("Pushover client validates the JSON status field", async (t) => {
   assert.equal(result.requestId, "request-id");
   assert.equal(receivedBody.token, "app-token");
   assert.equal(receivedBody.user, "user-key");
+});
+
+
+test("successful notifications explicitly report an unknown origin when Syncthing provides none", () => {
+  const payload = buildPushoverMessage({
+    type: "sync_completed",
+    folderName: "Screenshots",
+    instanceName: "MiniPC",
+    count: 1,
+    originDeviceNames: []
+  }, baseConfig());
+
+  assert.match(payload.message, /Origen: no identificado\./);
 });

@@ -28,6 +28,13 @@ function normalizeFolders(folders) {
           sampleError: folder?.errors?.sampleError ? String(folder.errors.sampleError) : null,
           seen: Array.isArray(folder?.errors?.seen) ? folder.errors.seen.map(String) : []
         },
+        origins: {
+          deviceIds: Array.isArray(folder?.origins?.deviceIds)
+            ? [...new Set(folder.origins.deviceIds.map((value) =>
+                String(value).replace(/[^A-Z0-9]/gi, "").toUpperCase()
+              ).filter(Boolean))]
+            : []
+        },
         lastEventId: Number.isInteger(folder?.lastEventId) ? folder.lastEventId : 0,
         lastEventTime: typeof folder?.lastEventTime === "string" ? folder.lastEventTime : null
       }

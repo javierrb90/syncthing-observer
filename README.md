@@ -35,7 +35,7 @@ The observer reloads Syncthing metadata after a `ConfigSaved` event, so newly ad
 
 ## Device-origin detection
 
-The observer explicitly subscribes to Syncthing's `RemoteChangeDetected` event in addition to `ItemFinished` and `StateChanged`. The event provides Syncthing's short `modifiedBy` device ID. The observer resolves it against `/rest/config/devices` and uses the configured device name in the Pushover message.
+The observer uses two independent Syncthing event streams. The main `/rest/events` stream watches `ItemFinished`, `StateChanged`, and `ConfigSaved`; the dedicated `/rest/events/disk` stream watches disk-change events and keeps only `RemoteChangeDetected`. That event provides Syncthing's short `modifiedBy` device ID. The observer resolves it against `/rest/config/devices` and uses the configured device name in the Pushover message. Keeping separate cursors is important because Syncthing maintains separate subscriptions and event IDs for different event masks.
 
 `Origen` means the device that originally modified the received file version. It is not necessarily the peer that physically supplied every data block to the MiniPC. If several devices originated files in the same aggregated folder cycle, every unique device name is listed. If Syncthing does not provide enough information for a successful cycle, the notification says `Origen: no identificado.`
 
@@ -159,12 +159,24 @@ Example response:
 {
   "ok": true,
   "syncthingConnected": true,
+  "mainEventStreamConnected": true,
+  "diskEventStreamConnected": true,
   "instanceId": "DEVICE-ID",
   "instanceName": "MiniPC",
   "folders": 20,
   "pendingNotifications": 0
 }
 ```
+
+## Event-stream troubleshooting
+
+The main and disk event streams are intentionally polled separately. If device-origin detection is added to an existing deployment, look for this one-time migration log after rebuilding:
+
+```text
+event=event_cursors_migrated cursorSchemaVersion=2 lastMainEvent=... lastDiskEvent=...
+```
+
+Then perform a new synchronization. No `.env` change is required for this migration. The `/health` response reports the status of both streams independently.
 
 ## Local development
 
@@ -203,13 +215,16 @@ Run the Pushover test from the Docker host after the health endpoint responds.
 
 ## First start
 
-On its first start, the observer requests only the latest buffered relevant event ID and persists it without generating notifications. Historical Syncthing events are ignored.
+On its first start, the observer requests only the latest buffered event ID from both the main and disk streams and persists them without generating notifications. Historical Syncthing events are ignored.
+
+When upgrading from a version that used a single combined cursor, the application performs the same one-time cursor migration. The first new synchronization after the `event_cursors_migrated` log entry is observed normally.
 
 ## Persistent state and delivery
 
 `state.json` contains:
 
-- The last processed Syncthing event ID.
+- The last processed event ID for the main Syncthing stream.
+- The last processed event ID for the disk-change stream.
 - Folder activity that has not yet reached the end of its quiet period.
 - A persistent notification outbox.
 

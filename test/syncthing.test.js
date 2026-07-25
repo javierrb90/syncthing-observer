@@ -162,3 +162,34 @@ test("multiple origin devices are deduplicated and resolved from Syncthing names
   assert.deepEqual(sent[0].originDeviceNames, ["Consola A", "Consola B"]);
   assert.deepEqual(sent[0].originDeviceIds, ["AAAAAAA", "BBBBBBB"]);
 });
+
+test("cursor migration keeps main and disk event streams separate", async () => {
+  const sent = [];
+  const { monitor, state } = makeMonitor(sent);
+  const requested = [];
+
+  state.initialized = true;
+  state.lastMainEvent = 999;
+  delete state.cursorSchemaVersion;
+  delete state.diskInitialized;
+  delete state.lastDiskEvent;
+
+  monitor.request = async (path) => {
+    requested.push(path);
+    if (path.startsWith("/rest/events?")) return [{ id: 42 }];
+    if (path.startsWith("/rest/events/disk?")) return [{ id: 84 }];
+    throw new Error(`Unexpected request: ${path}`);
+  };
+
+  await monitor.initializeCursors();
+
+  assert.equal(requested.length, 2);
+  assert.match(requested[0], /events=ItemFinished,StateChanged,ConfigSaved/);
+  assert.doesNotMatch(requested[0], /RemoteChangeDetected/);
+  assert.equal(requested[1], "/rest/events/disk?since=0&limit=1&timeout=1");
+  assert.equal(state.cursorSchemaVersion, 2);
+  assert.equal(state.lastMainEvent, 42);
+  assert.equal(state.lastDiskEvent, 84);
+  assert.equal(state.initialized, true);
+  assert.equal(state.diskInitialized, true);
+});

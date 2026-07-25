@@ -7,7 +7,8 @@ function normalizeDeviceId(value) {
   return String(value || "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
 }
 
-const MAIN_EVENTS = "ItemFinished,RemoteChangeDetected,StateChanged,ConfigSaved";
+const CURSOR_SCHEMA_VERSION = 2;
+const MAIN_EVENTS = "ItemFinished,StateChanged,ConfigSaved";
 
 function emptyFolderState() {
   return {
@@ -97,13 +98,16 @@ export class SyncthingMonitor {
     this.quietTimers = new Map();
     this.outboxRunning = false;
     this.outboxRetryTimer = null;
-    this.connected = false;
+    this.mainConnected = false;
+    this.diskConnected = false;
     this.state.outbox ??= [];
   }
 
   getStatus() {
     return {
-      syncthingConnected: this.connected,
+      syncthingConnected: this.mainConnected && this.diskConnected,
+      mainEventStreamConnected: this.mainConnected,
+      diskEventStreamConnected: this.diskConnected,
       instanceId: this.instanceId,
       instanceName: this.instanceName,
       folders: this.folderInfo.size,
@@ -175,20 +179,32 @@ export class SyncthingMonitor {
     );
   }
 
-  async initializeCursor() {
-    if (this.state.initialized) return;
+  async initializeCursors() {
+    const alreadyCurrent =
+      this.state.cursorSchemaVersion === CURSOR_SCHEMA_VERSION &&
+      this.state.initialized === true &&
+      this.state.diskInitialized === true;
 
-    const events = await this.request(
-      `/rest/events?since=0&limit=1&timeout=1&events=${MAIN_EVENTS}`
-    );
+    if (alreadyCurrent) return;
 
-    this.state.lastMainEvent = events.at(-1)?.id || 0;
+    const wasInitialized = this.state.initialized === true;
+    const [mainEvents, diskEvents] = await Promise.all([
+      this.request(`/rest/events?since=0&limit=1&timeout=1&events=${MAIN_EVENTS}`),
+      this.request("/rest/events/disk?since=0&limit=1&timeout=1")
+    ]);
+
+    this.state.lastMainEvent = mainEvents.at(-1)?.id || 0;
+    this.state.lastDiskEvent = diskEvents.at(-1)?.id || 0;
     this.state.folders = {};
     this.state.initialized = true;
+    this.state.diskInitialized = true;
+    this.state.cursorSchemaVersion = CURSOR_SCHEMA_VERSION;
     await this.saveState(this.state);
 
-    this.logger.info("event_history_skipped", {
-      lastMainEvent: this.state.lastMainEvent
+    this.logger.info(wasInitialized ? "event_cursors_migrated" : "event_history_skipped", {
+      cursorSchemaVersion: CURSOR_SCHEMA_VERSION,
+      lastMainEvent: this.state.lastMainEvent,
+      lastDiskEvent: this.state.lastDiskEvent
     });
   }
 
@@ -403,7 +419,7 @@ export class SyncthingMonitor {
 
         const events = await this.request(`/rest/events?${params}`);
         reconnectAttempt = 0;
-        this.connected = true;
+        this.mainConnected = true;
 
         for (const event of events) {
           this.logger.debug("syncthing_event", {
@@ -412,7 +428,6 @@ export class SyncthingMonitor {
           });
 
           if (event.type === "ItemFinished") this.handleItemFinished(event);
-          else if (event.type === "RemoteChangeDetected") this.handleRemoteChangeDetected(event);
           else if (event.type === "StateChanged") this.handleStateChanged(event);
           else if (event.type === "ConfigSaved") await this.handleConfigSaved();
 
@@ -422,7 +437,7 @@ export class SyncthingMonitor {
         if (events.length > 0) await this.saveState(this.state);
       } catch (error) {
         if (this.shutdownSignal.aborted) break;
-        this.connected = false;
+        this.mainConnected = false;
         const delay = jitteredBackoff(
           reconnectAttempt++,
           this.config.reconnectMinDelayMs,
@@ -437,21 +452,70 @@ export class SyncthingMonitor {
     }
   }
 
+
+  async pollDisk() {
+    let reconnectAttempt = 0;
+
+    while (!this.shutdownSignal.aborted) {
+      try {
+        const params = new URLSearchParams({
+          since: String(this.state.lastDiskEvent),
+          timeout: String(this.config.eventTimeoutSeconds)
+        });
+
+        const events = await this.request(`/rest/events/disk?${params}`);
+        reconnectAttempt = 0;
+        this.diskConnected = true;
+
+        for (const event of events) {
+          this.logger.debug("syncthing_disk_event", {
+            id: event.id,
+            type: event.type
+          });
+
+          if (event.type === "RemoteChangeDetected") {
+            this.handleRemoteChangeDetected(event);
+          }
+
+          this.state.lastDiskEvent = event.id;
+        }
+
+        if (events.length > 0) await this.saveState(this.state);
+      } catch (error) {
+        if (this.shutdownSignal.aborted) break;
+        this.diskConnected = false;
+        const delay = jitteredBackoff(
+          reconnectAttempt++,
+          this.config.reconnectMinDelayMs,
+          this.config.reconnectMaxDelayMs
+        );
+        this.logger.warn("syncthing_disk_stream_reconnecting", {
+          delayMs: delay,
+          error: error.message
+        });
+        await sleep(delay, undefined, { signal: this.shutdownSignal }).catch(() => {});
+      }
+    }
+  }
+
   async run() {
     await this.loadMetadata();
-    await this.initializeCursor();
-    this.connected = true;
+    await this.initializeCursors();
+    this.mainConnected = true;
+    this.diskConnected = true;
 
     this.logger.info("syncthing_connected", {
       instanceId: this.instanceId,
       instanceName: this.instanceName,
       folders: this.folderInfo.size,
-      quietPeriodMs: this.config.quietPeriodMs
+      quietPeriodMs: this.config.quietPeriodMs,
+      lastMainEvent: this.state.lastMainEvent,
+      lastDiskEvent: this.state.lastDiskEvent
     });
 
     this.resumePendingFolders();
     void this.drainOutbox();
-    await this.pollMain();
+    await Promise.all([this.pollMain(), this.pollDisk()]);
   }
 
   async stop() {

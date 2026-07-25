@@ -2,8 +2,11 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 const EMPTY_STATE = Object.freeze({
+  cursorSchemaVersion: 0,
   initialized: false,
+  diskInitialized: false,
   lastMainEvent: 0,
+  lastDiskEvent: 0,
   folders: {},
   outbox: []
 });
@@ -48,8 +51,13 @@ export async function loadState(file, logger) {
     const parsed = JSON.parse(raw);
 
     return {
+      cursorSchemaVersion: Number.isInteger(parsed.cursorSchemaVersion)
+        ? parsed.cursorSchemaVersion
+        : 0,
       initialized: parsed.initialized === true,
+      diskInitialized: parsed.diskInitialized === true,
       lastMainEvent: Number.isInteger(parsed.lastMainEvent) ? parsed.lastMainEvent : 0,
+      lastDiskEvent: Number.isInteger(parsed.lastDiskEvent) ? parsed.lastDiskEvent : 0,
       folders: normalizeFolders(parsed.folders),
       outbox: Array.isArray(parsed.outbox)
         ? parsed.outbox.filter((entry) => entry && typeof entry === "object")
